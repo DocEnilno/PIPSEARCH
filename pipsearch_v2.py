@@ -1,0 +1,194 @@
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import requests
+import subprocess
+import threading
+import os
+
+class PipSearchGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Pip Package Search Engine")
+
+        # Search bar
+        self.search_label = tk.Label(root, text="Search for a package:")
+        self.search_label.pack(pady=5)
+
+        self.search_entry = tk.Entry(root, width=50)
+        self.search_entry.pack(pady=5)
+
+        self.search_button = tk.Button(root, text="Search", command=self.search_packages)
+        self.search_button.pack(pady=5)
+
+        # Python version filter
+        self.python_version_label = tk.Label(root, text="Filter by Python version:")
+        self.python_version_label.pack(pady=5)
+
+        self.python_version_combobox = ttk.Combobox(root, values=["Any", "3.7", "3.8", "3.9", "3.10"])
+        self.python_version_combobox.set("Any")
+        self.python_version_combobox.pack(pady=5)
+
+        # Results list
+        self.results_listbox = tk.Listbox(root, width=60, height=15)
+        self.results_listbox.pack(pady=5)
+        self.results_listbox.bind('<<ListboxSelect>>', self.display_package_info)
+
+        # Install button
+        self.install_button = tk.Button(root, text="Install Selected Package", command=self.install_selected_package)
+        self.install_button.pack(pady=5)
+
+        # Detailed package info
+        self.package_info_label = tk.Label(root, text="Package Info:")
+        self.package_info_label.pack(pady=5)
+
+        self.package_info_text = tk.Text(root, height=10, wrap='word')
+        self.package_info_text.pack(pady=5)
+
+        # Dependencies info
+        self.dependencies_label = tk.Label(root, text="Dependencies:")
+        self.dependencies_label.pack(pady=5)
+
+        self.dependencies_text = tk.Text(root, height=5, wrap='word')
+        self.dependencies_text.pack(pady=5)
+
+        # Status bar
+        self.status_label = tk.Label(root, text="Status: Idle", relief=tk.SUNKEN, anchor=tk.W)
+        self.status_label.pack(fill=tk.X, side=tk.BOTTOM, ipady=2)
+
+        # Directory selection for download
+        self.download_dir_label = tk.Label(root, text="Select download directory:")
+        self.download_dir_label.pack(pady=5)
+
+        self.download_dir_button = tk.Button(root, text="Browse", command=self.select_directory)
+        self.download_dir_button.pack(pady=5)
+
+        self.download_dir = ""
+        self.package_data = {}
+
+    def search_packages(self):
+        search_term = self.search_entry.get()
+        python_version = self.python_version_combobox.get()
+
+        if search_term:
+            self.status_label.config(text="Searching...")
+            threading.Thread(target=self.perform_search, args=(search_term, python_version)).start()
+        else:
+            messagebox.showwarning("Input Error", "Please enter a package name.")
+
+    def perform_search(self, search_term, python_version):
+        # Use the PyPI API to search for packages containing or similar to the search term
+        url = f"https://pypi.org/pypi?%3Aaction=search&term={search_term}&submit=search"
+        response = requests.get(url)
+
+        self.results_listbox.delete(0, tk.END)
+
+        if response.status_code == 200:
+            # Parse the HTML response to extract package names (requires BeautifulSoup)
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+            search_results = soup.find_all('a', class_='package-snippet')
+
+            for project in search_results:
+                package_name = project.find('span', class_='package-snippet__name').text.strip()
+                # Check for the summary element
+                summary_element = project.find('span', class_='package-snippet__description')
+                summary = summary_element.text.strip() if summary_element else "No summary available"
+
+                self.results_listbox.insert(tk.END, package_name)
+                self.package_data[package_name] = {
+                    'url': project['href'],
+                    'summary': summary
+                }
+
+            self.status_label.config(text=f"Found {len(search_results)} packages.")
+        else:
+            self.status_label.config(text="No package found.")
+
+
+    def select_directory(self):
+        self.download_dir = filedialog.askdirectory()
+        if self.download_dir:
+            self.status_label.config(text=f"Download directory: {self.download_dir}")
+
+    def install_selected_package(self):
+        selected_package = self.results_listbox.get(tk.ACTIVE) or self.search_entry.get().strip()
+
+        if selected_package:
+            self.status_label.config(text=f"Installing {selected_package}...")
+            threading.Thread(target=self.install_package, args=(selected_package,)).start()
+        else:
+            messagebox.showwarning("Selection Error", "Please select a package or enter a package name.")
+
+
+
+    def install_package(self, package_name):
+        command = ["pip", "install", package_name]
+        
+        # If a download directory is specified, include it
+        if self.download_dir:
+            command.extend(["--target", self.download_dir])
+        
+        try:
+            subprocess.check_call(command)
+            self.status_label.config(text=f"Successfully installed {package_name}")
+            self.fetch_dependencies(package_name)  # Fetch dependencies after installation
+        except subprocess.CalledProcessError:
+            self.status_label.config(text=f"Failed to install {package_name}")
+
+
+    def display_package_info(self, event):
+        # Get the selected package
+        selection = event.widget.curselection()
+        if selection:
+            index = selection[0]
+            package_name = event.widget.get(index)
+            package_info = self.package_data.get(package_name, {})
+            
+            # Display package details
+            self.package_info_text.delete(1.0, tk.END)
+            self.package_info_text.insert(tk.END, f"Name: {package_name}\n")
+            self.package_info_text.insert(tk.END, f"Summary: {package_info.get('summary', 'No summary available')}\n")
+            self.package_info_text.insert(tk.END, f"URL: {package_info.get('url')}\n")
+
+            # Fetch detailed information about dependencies
+            self.fetch_package_details(package_name)
+
+    def fetch_package_details(self, package_name):
+        # Use PyPI API to fetch detailed info about the selected package
+        url = f"https://pypi.org/pypi/{package_name}/json"
+        response = requests.get(url)
+
+        if response.status_code == 200:
+            package_info = response.json().get('info', {})
+            self.package_info_text.insert(tk.END, f"Name: {package_info['name']}\n")
+            self.package_info_text.insert(tk.END, f"Version: {package_info['version']}\n")
+            self.package_info_text.insert(tk.END, f"Summary: {package_info['summary']}\n")
+            self.package_info_text.insert(tk.END, f"Home Page: {package_info['home_page']}\n")
+            self.package_info_text.insert(tk.END, f"Author: {package_info['author']}\n")
+            self.package_info_text.insert(tk.END, f"License: {package_info['license']}\n")
+        else:
+            self.package_info_text.insert(tk.END, "Error fetching package details.")
+
+    def fetch_dependencies(self, package_name):
+        # Fetch dependencies for the installed package
+        url = f"https://pypi.org/pypi/{package_name}/json"
+        response = requests.get(url)
+
+        if response.status_code == 200:
+            dependencies = response.json().get('info', {}).get('requires_dist', [])
+            self.dependencies_text.delete(1.0, tk.END)
+
+            if dependencies:
+                self.dependencies_text.insert(tk.END, "Dependencies:\n")
+                for dep in dependencies:
+                    self.dependencies_text.insert(tk.END, f"- {dep}\n")
+            else:
+                self.dependencies_text.insert(tk.END, "No dependencies found.")
+        else:
+            self.dependencies_text.insert(tk.END, "Error fetching dependencies.")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = PipSearchGUI(root)
+    root.mainloop()
